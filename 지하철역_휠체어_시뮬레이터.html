@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>지하철역 휠체어 사용자 시점 시뮬레이터</title>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0f1216;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    body { cursor: crosshair; }
+    #ui {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      z-index: 10;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.58);
+      border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 14px;
+      padding: 12px 14px;
+      max-width: 540px;
+      line-height: 1.55;
+      backdrop-filter: blur(6px);
+    }
+    #ui h1 { font-size: 16px; margin: 0 0 8px; }
+    #ui .small { font-size: 13px; color: #dedede; }
+    #sceneBadge {
+      display: inline-block; margin-top: 8px; padding: 4px 10px; border-radius: 999px;
+      font-size: 12px; background: rgba(255,255,255,0.11);
+    }
+    #status {
+      margin-top: 8px; font-weight: bold; color: #ffe38f; min-height: 22px;
+    }
+    #hint {
+      margin-top: 8px; color: #cfe7ff; font-size: 13px;
+    }
+    #crosshair {
+      position: fixed; left: 50%; top: 50%; width: 12px; height: 12px;
+      transform: translate(-50%, -50%); z-index: 9; pointer-events: none;
+    }
+    #crosshair::before, #crosshair::after {
+      content: ""; position: absolute; background: rgba(255,255,255,0.95);
+      border-radius: 999px; box-shadow: 0 0 6px rgba(255,255,255,0.25);
+    }
+    #crosshair::before { left: 5px; top: 0; width: 2px; height: 12px; }
+    #crosshair::after { left: 0; top: 5px; width: 12px; height: 2px; }
+    #overlay {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.74); color: #fff; z-index: 20; text-align: center; padding: 20px;
+    }
+    #overlay .box {
+      max-width: 700px; background: rgba(18,18,18,0.94); border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 18px; padding: 24px; box-shadow: 0 12px 50px rgba(0,0,0,0.45);
+    }
+    #overlay h2 { margin: 0 0 12px; font-size: 24px; }
+    #overlay p { margin: 8px 0; line-height: 1.6; color: #e8e8e8; }
+    #overlay button {
+      margin-top: 16px; border: 0; background: #2c7ef7; color: #fff; padding: 12px 18px;
+      border-radius: 10px; font-size: 15px; cursor: pointer;
+    }
+    #overlay button:hover { background: #1f6ce0; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <h1>지하철역 휠체어 사용자 시점 시뮬레이터</h1>
+    <div class="small">
+      마우스 = 시점 회전 (클릭 후 자동 잠금, 안 되면 클릭한 채로 드래그)<br>
+      W = 바라보는 방향 전진<br>
+      파손 보도블록 / 계단 / 경사로 상호작용
+    </div>
+    <div id="sceneBadge">장면: 지하철역 승강장</div>
+    <div id="hint">경사로를 오를 때는 처음엔 속도가 붙지만 점점 느려지다 일정 속도로 고정되고, 내려올 때는 갈수록 가속이 붙습니다.</div>
+    <div id="status">상태: 대기 중</div>
+  </div>
+  <div id="crosshair"></div>
+  <div id="overlay">
+    <div class="box">
+      <h2>지하철역 체험 시작</h2>
+      <p>경사로를 오를 때 카메라가 실제로 기울어지며 상승하고, 속도는 점점 줄어들다 일정하게 고정됩니다.</p>
+      <p>반대로 내려올 때는 갈수록 속도가 붙어 빨라집니다.</p>
+      <button id="startBtn">시작하기</button>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script>
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x14181f);
+    scene.fog = new THREE.Fog(0x14181f, 8, 110);
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 200);
+    camera.position.set(0, 0, 0);
+
+    const yawObject = new THREE.Object3D();
+    yawObject.position.set(0, 0.8, 14);
+    scene.add(yawObject);
+    yawObject.add(camera);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.body.appendChild(renderer.domElement);
+
+    scene.add(new THREE.AmbientLight(0xf2f5ff, 0.8));
+    scene.add(new THREE.HemisphereLight(0xddeeff, 0x1d2633, 0.8));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.1);
+    sun.position.set(6, 16, 10);
+    scene.add(sun);
+
+    function addBox(x, y, z, sx, sy, sz, color, rough = 0.95, metal = 0) {
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(sx, sy, sz),
+        new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: metal })
+      );
+      mesh.position.set(x, y, z);
+      scene.add(mesh);
+      return mesh;
+    }
+
+    function addCylinder(x, y, z, rTop, rBot, h, color, rough = 0.9, metal = 0) {
+      const mesh = new THREE.Mesh(
+        new THREE.CylinderGeometry(rTop, rBot, h, 20),
+        new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: metal })
+      );
+      mesh.position.set(x, y, z);
+      scene.add(mesh);
+      return mesh;
+    }
+
+    function makeSign(text, x, y, z, w = 4.8, h = 1.1, bg = '#0b2c5a') {
+      const canvas = document.createElement('canvas');
+      canvas.width = 1024;
+      canvas.height = 256;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 72px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 10;
+      ctx.strokeRect(8, 8, canvas.width - 16, canvas.height - 16);
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.MeshBasicMaterial({ map: tex });
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+      mesh.position.set(x, y, z);
+      scene.add(mesh);
+      return mesh;
+    }
+
+    addBox(0, -0.01, 0, 120, 0.02, 120, 0x424850, 1, 0);
+    addBox(0, 0.1, -14, 68, 0.2, 30, 0x5b6169, 1, 0);
+
+    addBox(0, 2.8, -38, 68, 5.6, 0.3, 0x39424d, 0.95, 0);
+    addBox(-34, 2.8, -14, 0.3, 5.6, 28, 0x3b434c, 0.95, 0);
+    addBox(34, 2.8, -14, 0.3, 5.6, 28, 0x3b434c, 0.95, 0);
+
+    for (let i = -27; i <= 27; i += 6) {
+      addCylinder(i, 2.8, -20, 0.42, 0.42, 5.6, 0x6d747c, 0.9, 0.1);
+      addBox(i, 5.55, -20, 1.2, 0.12, 3.2, 0xd9dde5, 0.4, 0);
+    }
+
+    for (let i = -27; i <= 27; i += 6) {
+      addBox(i, 4.75, -12, 4.0, 0.14, 0.7, 0xf5f5f5, 0.7, 0);
+      const light = new THREE.PointLight(0xffffff, 1.0, 24);
+      light.position.set(i, 4.35, -12);
+      scene.add(light);
+    }
+
+    makeSign('개찰구', 0, 3.7, -5, 3.8, 0.95, '#8b1f1f');
+    makeSign('출입구 / 경사로', 0, 3.7, -22, 4.8, 0.95, '#0b4a3c');
+    makeSign('파손 보도블록', -16, 3.7, -18, 4.2, 0.95, '#6b5500');
+    makeSign('계단', -26, 3.7, -28, 3.0, 0.95, '#7b2d5a');
+
+    addBox(-2.3, 1.1, -5, 0.35, 2.2, 0.35, 0x8f8f8f, 0.35, 0.4);
+    addBox(-1.4, 1.1, -5, 0.35, 2.2, 0.35, 0x8f8f8f, 0.35, 0.4);
+    addBox(-0.5, 1.1, -5, 0.35, 2.2, 0.35, 0x8f8f8f, 0.35, 0.4);
+    addBox(0.5, 1.1, -5, 0.35, 2.2, 0.35, 0x8f8f8f, 0.35, 0.4);
+    addBox(1.4, 1.1, -5, 0.35, 2.2, 0.35, 0x8f8f8f, 0.35, 0.4);
+    addBox(2.3, 1.1, -5, 0.35, 2.2, 0.35, 0x8f8f8f, 0.35, 0.4);
+    addBox(0, 2.0, -5, 5.8, 0.16, 0.25, 0x9aa0a6, 0.45, 0.25);
+    addBox(0, 0.8, -5, 1.0, 1.6, 0.3, 0x1b2128, 1, 0);
+
+    // 경사로: 실제 이동 로직(RAMP_Z_BOTTOM~RAMP_Z_TOP, 높이 상승량 RAMP_RISE)과 정확히 맞춘 기울기.
+    // 경사로 상단 끝에서 착지 평면이 끊김/겹침 없이 정확히 맞닿도록 계산.
+    const RAMP_Z_BOTTOM = -16;   // 경사로 시작 (바닥면 높이 0.2)
+    const RAMP_Z_TOP = -36;      // 경사로 끝 (여기서부터 평평한 착지면)
+    const RAMP_RISE = 1.2;       // 바닥면이 올라가는 높이
+    const RAMP_BASE_FLOOR_Y = 0.2; // 승강장 바닥면 높이와 동일
+
+    const rampLength = RAMP_Z_BOTTOM - RAMP_Z_TOP; // 20
+    const rampAngle = Math.atan2(RAMP_RISE, rampLength);
+    const rampThickness = 0.3;
+    // 경사로 박스의 중심 y: 시작/끝 지점의 "표면" 높이에서 두께 절반만큼 아래로 내린 값의 평균
+    const rampBottomCenterY = RAMP_BASE_FLOOR_Y - (rampThickness / 2) * Math.cos(rampAngle);
+    const rampTopCenterY = (RAMP_BASE_FLOOR_Y + RAMP_RISE) - (rampThickness / 2) * Math.cos(rampAngle);
+    const rampCenterY = (rampBottomCenterY + rampTopCenterY) / 2;
+    const rampCenterZ = (RAMP_Z_BOTTOM + RAMP_Z_TOP) / 2;
+
+    const ramp = addBox(0, rampCenterY, rampCenterZ, 8, rampThickness, rampLength + 0.02, 0xc0c0c0, 0.95, 0);
+    ramp.rotation.x = rampAngle;
+
+    // 착지 평면: 경사로 상단 표면 높이(0.2 + 1.2 = 1.4)에서 시작해 뒷벽까지 이어지도록 배치.
+    // 경사로 끝(z = RAMP_Z_TOP)과 겹치거나 틈이 생기지 않도록 착지면의 앞쪽 경계를 경사로 끝에 정확히 맞춤.
+    const landingSurfaceY = RAMP_BASE_FLOOR_Y + RAMP_RISE; // 1.4
+    const landingDepth = 4.2;
+    const landingCenterZ = RAMP_Z_TOP - landingDepth / 2; // 경사로 끝에서부터 뒤로 이어짐
+    addBox(0, landingSurfaceY - rampThickness / 2, landingCenterZ, 8, rampThickness, landingDepth, 0xd3d3d3, 0.95, 0);
+
+    addBox(-16, -0.02, -18, 6, 0.18, 4, 0x151515, 1, 0);
+    for (let i = -2; i <= 2; i++) addBox(-16 + i * 1.3, 0.09, -18, 0.8, 0.08, 3.4, 0x7d7669, 1, 0);
+
+    for (let i = 0; i < 5; i++) addBox(-26, 0.125 + i * 0.25, -28 - i * 1.0, 4, 0.25, 1, 0x80858c, 1, 0);
+
+    const keys = { w: false, a: false, s: false, d: false };
+    let yaw = 0;
+    let pitch = 0;
+    let started = false;
+    let pointerLocked = false;
+    let stairBumpDone = false;
+    let stairBumpTime = 0;
+    let brokenBumpTime = 0;
+
+    // 마우스 드래그 기반 시점 회전 (Pointer Lock이 iframe 등 환경에서 막힐 경우를 대비한 대체 수단)
+    let isDragLooking = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+
+    // 경사로 전용 상태값: 이전 프레임에 경사로에 있었는지, 오르막에서의 "고정 속도" 도달 여부
+    let wasOnRamp = false;
+    let rampEnterDirection = null; // 'up' or 'down'
+
+    const statusEl = document.getElementById('status');
+    const overlay = document.getElementById('overlay');
+
+    document.getElementById('startBtn').addEventListener('click', async () => {
+      overlay.style.display = 'none';
+      started = true;
+      try { await document.body.requestPointerLock(); } catch (e) {}
+    });
+
+    document.addEventListener('pointerlockchange', () => {
+      pointerLocked = (document.pointerLockElement === document.body);
+    });
+
+    window.addEventListener('keydown', e => { const k = e.key.toLowerCase(); if (k in keys) keys[k] = true; });
+    window.addEventListener('keyup', e => { const k = e.key.toLowerCase(); if (k in keys) keys[k] = false; });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!started) return;
+
+      if (pointerLocked) {
+        // Pointer Lock이 정상 동작하는 환경: movementX/Y 기반 회전
+        yaw -= (e.movementX || 0) * 0.0022;
+        pitch -= (e.movementY || 0) * 0.0018;
+        pitch = Math.max(-0.5, Math.min(0.42, pitch));
+        return;
+      }
+
+      // Pointer Lock을 쓸 수 없는 환경(예: 샌드박스 iframe)을 위한 드래그 기반 대체 회전
+      if (isDragLooking) {
+        const dx = e.clientX - lastMouseX;
+        const dy = e.clientY - lastMouseY;
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+        yaw -= dx * 0.0032;
+        pitch -= dy * 0.0026;
+        pitch = Math.max(-0.5, Math.min(0.42, pitch));
+      }
+    });
+
+    document.body.addEventListener('mousedown', (e) => {
+      if (!started || pointerLocked) return;
+      isDragLooking = true;
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+    });
+    window.addEventListener('mouseup', () => { isDragLooking = false; });
+    window.addEventListener('mouseleave', () => { isDragLooking = false; });
+
+    function rampHeightByProgress(t) {
+      return 0.8 + t * 1.2;
+    }
+
+    // 오르막: 처음엔 속도가 붙어 있다가 점점 느려지고, 일정 지점부터는 고정된 저속으로 유지된다.
+    const RAMP_ASCEND_BASE = 1.0;   // 진입 시 초기 배속
+    const RAMP_ASCEND_FLOOR = 0.42; // 고정되는 최소 배속
+    const RAMP_ASCEND_DECAY = 2.2;  // 감속이 진행되는 빠르기 (t 기준)
+
+    // 내리막: 내려갈수록 계속 가속이 붙는다.
+    const RAMP_DESCEND_BASE = 0.55; // 진입 시 초기 배속
+    const RAMP_DESCEND_MAX = 2.2;   // 최대 가속 배속
+    const RAMP_DESCEND_GAIN = 1.9;  // 가속이 붙는 빠르기
+
+    const RAMP_TILT = 0.16; // 경사로 위에서 카메라가 기울어지는 각도(라디안)
+
+    function ascendSpeedFactor(t) {
+      // t: 0(하단) -> 1(상단). 진행할수록 base에서 floor까지 감속되다가 고정.
+      const decel = RAMP_ASCEND_BASE - t * RAMP_ASCEND_DECAY;
+      return Math.max(RAMP_ASCEND_FLOOR, decel);
+    }
+
+    function descendSpeedFactor(t) {
+      // t: 1(상단) -> 0(하단). 내려갈수록(=t가 작아질수록) 점점 가속.
+      const progressDown = 1 - t;
+      const accel = RAMP_DESCEND_BASE + progressDown * RAMP_DESCEND_GAIN;
+      return Math.min(RAMP_DESCEND_MAX, accel);
+    }
+
+    function updateMovement(delta) {
+      yawObject.rotation.y = yaw;
+      camera.rotation.x = pitch;
+
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(yawObject.quaternion).setY(0).normalize();
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(yawObject.quaternion).setY(0).normalize();
+
+      const move = new THREE.Vector3();
+      if (keys.w) move.add(forward);
+      if (keys.s) move.sub(forward);
+      if (keys.d) move.add(right);
+      if (keys.a) move.sub(right);
+      if (move.lengthSq() > 0) move.normalize().multiplyScalar(3.1 * delta);
+
+      const prevX = yawObject.position.x;
+      const prevZ = yawObject.position.z;
+      const nextX = prevX + move.x;
+      const nextZ = prevZ + move.z;
+
+      if (Math.abs(nextX) < 2.8 && nextZ < -3.6 && nextZ > -6.4) {
+        statusEl.textContent = '상태: 개찰구가 좁아 통과하기 어렵습니다. 우회로를 탐색하세요.';
+        yawObject.position.x = prevX;
+        yawObject.position.z = prevZ;
+        yawObject.position.y = 0.8;
+        wasOnRamp = false;
+        return;
+      }
+
+      const stairZone = nextX < -23 && nextX > -29 && nextZ < -26 && nextZ > -33;
+      if (stairZone) {
+        if (!stairBumpDone) {
+          stairBumpDone = true;
+          stairBumpTime = 0.35;
+          statusEl.textContent = '상태: 계단에 부딪혔습니다. 잠시 막힙니다.';
+        }
+        if (stairBumpTime > 0) {
+          stairBumpTime -= delta;
+          yawObject.position.x = prevX + Math.sin(performance.now() * 0.02) * 0.02;
+          yawObject.position.z = prevZ + Math.cos(performance.now() * 0.02) * 0.02;
+          yawObject.position.y = 0.8 + Math.sin(performance.now() * 0.04) * 0.008;
+        } else {
+          yawObject.position.x = prevX;
+          yawObject.position.z = prevZ;
+          yawObject.position.y = 0.8;
+        }
+        wasOnRamp = false;
+        return;
+      } else {
+        stairBumpDone = false;
+      }
+
+      const brokenZone = nextX > -19 && nextX < -13 && nextZ < -16 && nextZ > -20;
+      if (brokenZone) {
+        brokenBumpTime += delta;
+        statusEl.textContent = '상태: 파손 보도블록입니다. 덜컹거리는 구간을 지나고 있습니다.';
+        yawObject.position.x = nextX;
+        yawObject.position.z = nextZ;
+        yawObject.position.y = 0.8 + Math.sin(performance.now() * 0.05) * 0.04;
+        if (brokenBumpTime > 3) brokenBumpTime = 0;
+        wasOnRamp = false;
+        return;
+      } else {
+        brokenBumpTime = 0;
+      }
+
+      yawObject.position.x = nextX;
+      yawObject.position.z = nextZ;
+
+      const rampZoneFar = RAMP_Z_TOP - landingDepth; // 착지면 뒤쪽 끝까지 포함
+      const rampZone = nextZ < RAMP_Z_BOTTOM && nextZ > rampZoneFar && Math.abs(nextX) < 5.0;
+      if (rampZone) {
+        const t = THREE.MathUtils.clamp((RAMP_Z_BOTTOM - nextZ) / rampLength, 0, 1);
+        const targetY = rampHeightByProgress(t);
+        // 카메라(눈높이)가 실제로 경사면을 따라 오르내리듯 부드럽게 높이를 보간
+        yawObject.position.y += (targetY - yawObject.position.y) * 0.15;
+
+        const isAscending = forward.z < 0;
+
+        if (!wasOnRamp) {
+          rampEnterDirection = isAscending ? 'up' : 'down';
+        }
+        wasOnRamp = true;
+
+        if (isAscending) {
+          const factor = ascendSpeedFactor(t);
+          yawObject.position.x += forward.x * delta * 0.28 * factor;
+          yawObject.position.z += forward.z * delta * 0.28 * factor;
+          camera.rotation.x = pitch + RAMP_TILT; // 오르막을 올려다보듯 카메라 기울임
+          const pct = Math.round(factor * 100);
+          if (factor <= RAMP_ASCEND_FLOOR + 0.01) {
+            statusEl.textContent = `상태: 경사로를 오르는 중 - 일정 속도로 고정됨 (${pct}%)`;
+          } else {
+            statusEl.textContent = `상태: 경사로를 오르는 중 - 점점 느려지는 중 (${pct}%)`;
+          }
+        } else {
+          const factor = descendSpeedFactor(t);
+          yawObject.position.x += forward.x * delta * 0.28 * factor;
+          yawObject.position.z += forward.z * delta * 0.28 * factor;
+          camera.rotation.x = pitch - RAMP_TILT; // 내리막을 내려다보듯 카메라 기울임
+          const pct = Math.round(factor * 100);
+          statusEl.textContent = `상태: 경사로를 내려가는 중 - 점점 가속되는 중 (${pct}%)`;
+        }
+      } else {
+        yawObject.position.y = 0.8;
+        camera.rotation.x = pitch;
+        wasOnRamp = false;
+        statusEl.textContent = '상태: 승강장을 이동 중입니다.';
+      }
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      if (started) updateMovement(0.016);
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
